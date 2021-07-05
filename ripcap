@@ -1,0 +1,258 @@
+#!/usr/bin/env python3
+import argparse
+import os
+import struct
+import sys
+import ipaddress
+import pprint
+import datetime
+from dateutil import parser as dateutilParser
+
+args = None
+globalHeader = False
+
+protocols = {
+  'icmp': 1,
+  'tcp' : 6,
+  'udp' : 17
+}
+
+def main():
+  global args, protocols
+  parser = argparse.ArgumentParser()
+  parser.add_argument("infile",           help="Input filename")
+  parser.add_argument("outfile",          help="Output filename")
+  parser.add_argument("-e", "--ether",    help="Match MAC Address")
+  parser.add_argument("-i", "--inet",     help="Match IP Address")
+  parser.add_argument("-p", "--port",     help="Match Port", type=int)
+  parser.add_argument("-P", "--proto",    help="Match Protocol", choices=protocols.keys())
+  parser.add_argument("-f", "--from", dest='time',     help="Start Time")
+  parser.add_argument("-t", "--to",       help="End Time")
+  parser.add_argument("-c", "--count",    help="Maximimum number of matches", type=int)
+  parser.add_argument("-x", "--hex",      help="Match byte string")
+  parser.add_argument("-v", "--verbose",  action="store_true")
+  
+  
+  args = parser.parse_args()
+  if not os.path.isfile(args.infile):
+    print("Input file not found: {}".format(args.infile))
+    sys.exit(-1)
+  
+  # calculate these upfront else I convert them on every single packet
+
+  if args.ether:
+    # This is a bit ugly, but the alternative was a whole external macaddress library
+    args.ether=args.ether.replace(' ','')
+    args.ether=args.ether.replace(':','')
+    args.ether=args.ether.replace('-','')
+    args.ether=bytes.fromhex(args.ether)
+  
+  if args.inet:
+    args.inet=ipaddress.IPv4Address(args.inet).packed
+  
+  if args.hex:
+    args.hex=bytes.fromhex(args.hex.replace(' ',''))
+
+  configured = False
+  with open(args.outfile, 'wb') as outfile:
+    with open(args.infile, 'rb') as infile:
+      fileHeader = infile.read(24)
+      outfile.write(fileHeader)
+      
+      count_input=0
+      count_output=0
+      running=True
+
+      while running:
+        if args.count:
+          if count_output==args.count:
+            running=False
+            if args.verbose:
+              print("Hit Maximum count")
+              print("Matched {} packets from {}".format(count_output,count_input))
+            continue
+
+        header=infile.read(16)
+
+        if len(header)!=16:
+          running=False
+          if args.verbose:
+            print("Matched {} packets from {}".format(count_output,count_input))
+        else:
+          count_input+=1
+          Header = readPacketHeader(header)
+          packet = infile.read(Header['incl_len'])
+          if not configured:
+            args = findDefaultTime(args, Header)
+            configured=True
+          if matchPacket(Header, packet):
+            count_output+=1
+            outfile.write(header)
+            outfile.write(packet)
+
+def findDefaultTime(args, Header):
+  """ convert timestamps once we already have a first packet header """
+  # time parsing is a little funky because if I have a start time, I want to use it as the default for the endtime
+  # this allows me to do stuff like from 2020-06-01, to 12:00 - the use of defaults makes the start time the default for implied dates in the endtime
+
+  # Take the date (but not the time) from the pcap header
+  firstPacketTime = datetime.datetime.fromtimestamp(Header['ts_sec']).replace(hour=0, minute=0, second=0, microsecond=0)
+
+  if args.time:
+    # If we have a start time, use the packet date as the default for the start, and the start as the default for the end
+    args.time = dateutilParser.parse(args.time, default=firstPacketTime)
+    if args.to:
+      args.to = dateutilParser.parse(args.to, default=args.time)
+  else:
+    if args.to:
+      args.to = dateutilParser.parse(args.to, default=firstPacketTime)
+
+  # once we're done doing date manipulations, cast them to timestamps 
+  if args.time:
+    args.time=int(args.time.timestamp())
+  if args.to:
+    args.to=int(args.to.timestamp())
+
+  return args
+
+def matchPacket(header, packet):
+  """ Packet in, boolean out """
+  global args
+  tests = 0
+  passes = 0
+
+  #==================================================
+  # Test for ethernet address
+
+  if args.ether:
+    tests+=1
+
+    if packet[0:6]==args.ether:
+      passes+=1
+    if packet[6:12]==args.ether:
+      passes+=1
+  
+  #==================================================
+  # Test for IP address
+
+  if args.inet:
+    tests+=1
+    field = False
+    if packet[14]>>4==4:
+      if packet[26:30]==args.inet:
+        passes+=1
+      if packet[30:34]==args.inet:
+        passes+=1
+
+
+  #==================================================
+  # Test for Port (by number)
+
+  if args.port:
+    tests+=1
+    field=False
+    headerlength=False
+    # Calculate offset for IPv4
+    if packet[14]>>4==4:
+      headerlength = 4*(packet[14]-((packet[14])>>4)*16) # calculate the IP header length from the low half of ip.byte0
+      headerlength += 14 # add an offset for the ether header
+    # Calculate offset for IPv6
+    if packet[14]>>4==6:
+      headerlength = 54 # I love ipv6
+
+    if headerlength:
+      # Lucky me, tcp & udp both put their src/dst ports at the same offset, at the start of their header
+      if int.from_bytes(packet[headerlength:headerlength+2], byteorder='big', signed=False) == args.port:
+        passes+=1
+      if int.from_bytes(packet[headerlength+2:headerlength+4], byteorder='big', signed=False) == args.port:
+        passes+=1
+
+  #==================================================
+  # Test for Protocol (TCP/UDP/etc)
+
+  if args.proto:
+    tests+=1
+    field=False
+    # Calculate a byte offset for ipv6
+    if packet[14]>>4==6:
+      field = 20
+    # Calculate a byte offset for ipv4
+    if packet[14]>>4==4:
+      field = 23
+    # Test the byte offset against the protocol dict
+    if protocols[args.proto]==packet[field]:
+      passes+=1
+
+  #==================================================
+  # Test for hex
+
+  if args.hex:
+    tests+=1
+    if args.hex in packet:
+      passes+=1
+
+  #==================================================
+  # Test for start time
+
+  if args.time:
+    tests+=1
+    if header['ts_sec']>args.time:
+      passes+=1
+
+
+  #==================================================
+  # Test for end time
+
+  if args.to:
+    tests+=1
+    if args.to>header['ts_sec']:
+      passes+=1
+
+  return(tests==passes)
+
+def readGlobalHeader(bytes):
+  """ reads pcap global header, returns dict """
+  global globalHeader
+  globalHeader = bytes
+  config={}
+
+  magic=bytes[0:4]
+  if magic == b'\xd4\xc3\xb2\xa1':
+    config['swapped']=False
+  else:
+    config['swapped']=True
+
+  unpacked = struct.unpack('IHHIIII', bytes)
+  config['magic_number']  =unpacked[0]
+  config['version_major'] =unpacked[1]
+  config['version_minor'] =unpacked[2]
+  config['thiszone']      =unpacked[3]
+  config['sigfigs']       =unpacked[4]
+  config['snaplen']       =unpacked[5]
+  config['network']       =unpacked[6]
+  return(config)
+
+def readPacketHeader(bytes):
+  """ reads a pcap packet header, returns dict """
+  unpacked = struct.unpack('IIII', bytes)
+  return({
+    'ts_sec'   : unpacked[0],
+    'ts_usec'  : unpacked[1],
+    'incl_len' : unpacked[2],
+    'orig_len' : unpacked[3]
+  })
+
+def hexdump(bytes, label=False):
+  """ for debuging, because pprint is crappy at byte arrays """
+  if label:
+    print("{}:\t{}".format(
+      label,
+      ' '.join('{:02x}'.format(x) for x in bytes)
+    ))
+  else:
+    print(' '.join('{:02x}'.format(x) for x in bytes))
+
+
+if __name__ == '__main__':
+  main()
+
