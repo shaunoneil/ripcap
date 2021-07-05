@@ -12,7 +12,7 @@ Split matching frames from a pcap file
 |-------------------------|--------------------------------------------------|
 | -h, --help              | Show help message and exit                       |
 | -e ETHER, --ether ETHER | Match MAC Address                                |
-| -i INET, --inet INET    | Match IP Address                                 |
+| -i INET, --ip INET      | Match IP Address                                 |
 | -p PORT, --port PORT    | Match Port                                       |
 | -P {icmp,tcp,udp}, --proto {icmp,tcp,udp} | Match Protocol                 |
 | -f TIME, --from TIME    | Start Time                                       |
@@ -20,6 +20,16 @@ Split matching frames from a pcap file
 | -c COUNT, --count COUNT | Maximimum number of matches                      |
 | -x HEX, --hex HEX       | Match byte string                                |
 | -v, --verbose           | Additional output (gives a count of packets)     |
+
+## Multiple tests
+
+`--ip`, `--ether`, `--port`, `--proto`, `--hex` may be specified multiple times.
+
+Between multiple tests of the same time, any (or) must match.  Between multiple tests of different types, all (and) must match. eg:
+
+* `--ip 192.168.1.1 --hex c0ffee` must match 192.168.1.1 AND must contain the bytes c0,ff,ee
+* `--ip 192.168.1.1 --ip 192.168.1.2` must match 192.168.1.1 OR 192.168.1.2
+* `--ip 192.168.1.1 --ip 192.168.1.2 --port 161` must match (192.168.1.1 OR 192.168.1.2) AND port 161.
 
 ## Hex
 

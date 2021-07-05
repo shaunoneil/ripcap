@@ -22,14 +22,14 @@ def main():
   parser = argparse.ArgumentParser()
   parser.add_argument("infile",           help="Input filename")
   parser.add_argument("outfile",          help="Output filename")
-  parser.add_argument("-e", "--ether",    help="Match MAC Address")
-  parser.add_argument("-i", "--inet",     help="Match IP Address")
-  parser.add_argument("-p", "--port",     help="Match Port", type=int)
-  parser.add_argument("-P", "--proto",    help="Match Protocol", choices=protocols.keys())
-  parser.add_argument("-f", "--from", dest='time',     help="Start Time")
-  parser.add_argument("-t", "--to",       help="End Time")
-  parser.add_argument("-c", "--count",    help="Maximimum number of matches", type=int)
-  parser.add_argument("-x", "--hex",      help="Match byte string")
+  parser.add_argument("-e", "--ether",    action="append",              help="Match MAC Address")
+  parser.add_argument("-i", "--ip",       action="append",              help="Match IP Address")
+  parser.add_argument("-p", "--port",     type=int,action="append",     help="Match Port")
+  parser.add_argument("-P", "--proto",    action="append",              help="Match Protocol", choices=protocols.keys())
+  parser.add_argument("-f", "--from",     dest='time',                  help="Start Time")
+  parser.add_argument("-t", "--to",                                     help="End Time")
+  parser.add_argument("-c", "--count",    type=int,                     help="Maximimum number of matches")
+  parser.add_argument("-x", "--hex",      action="append",              help="Match byte string")
   parser.add_argument("-v", "--verbose",  action="store_true")
   
   
@@ -41,18 +41,23 @@ def main():
   # calculate these upfront else I convert them on every single packet
 
   if args.ether:
-    # This is a bit ugly, but the alternative was a whole external macaddress library
-    args.ether=args.ether.replace(' ','')
-    args.ether=args.ether.replace(':','')
-    args.ether=args.ether.replace('-','')
-    args.ether=bytes.fromhex(args.ether)
+    for x, y in enumerate(args.ether):
+      # This is a bit ugly, but the alternative was a whole external macaddress library
+      args.ether[x]=args.ether[x].replace(' ','')
+      args.ether[x]=args.ether[x].replace(':','')
+      args.ether[x]=args.ether[x].replace('-','')
+      args.ether[x]=bytes.fromhex(args.ether[x])
   
-  if args.inet:
-    args.inet=ipaddress.IPv4Address(args.inet).packed
+  if args.ip:
+    for x, y in enumerate(args.ip):
+      args.ip[x]=ipaddress.IPv4Address(y).packed
   
   if args.hex:
-    args.hex=bytes.fromhex(args.hex.replace(' ',''))
-
+    for x,y in enumerate(args.hex):
+      args.hex[x]=bytes.fromhex(y.replace(' ',''))
+  
+  pprint.pprint(args)
+  
   configured = False
   with open(args.outfile, 'wb') as outfile:
     with open(args.infile, 'rb') as infile:
@@ -64,6 +69,7 @@ def main():
       running=True
 
       while running:
+        # bail early if we've hit the maximum count
         if args.count:
           if count_output==args.count:
             running=False
@@ -71,9 +77,10 @@ def main():
               print("Hit Maximum count")
               print("Matched {} packets from {}".format(count_output,count_input))
             continue
-
+        
         header=infile.read(16)
 
+        # bail if we've run out of file
         if len(header)!=16:
           running=False
           if args.verbose:
@@ -85,6 +92,16 @@ def main():
           if not configured:
             args = findDefaultTime(args, Header)
             configured=True
+
+          # bail if we have a --to time that's been passed
+          if args.to:
+            if int(Header['ts_sec'])>args.to:
+              running=False
+              if args.verbose:
+                print("Hit Maximum time")
+                print("Matched {} packets from {}".format(count_output,count_input))
+              continue
+
           if matchPacket(Header, packet):
             count_output+=1
             outfile.write(header)
@@ -118,39 +135,36 @@ def findDefaultTime(args, Header):
 def matchPacket(header, packet):
   """ Packet in, boolean out """
   global args
-  tests = 0
-  passes = 0
+  result = True
 
   #==================================================
   # Test for ethernet address
 
   if args.ether:
-    tests+=1
-
-    if packet[0:6]==args.ether:
-      passes+=1
-    if packet[6:12]==args.ether:
-      passes+=1
+    thistest = False
+    for x in args.ether:
+      if packet[0:6]==x or packet[6:12]==x:
+        thistest = True
+    if not thistest:
+      result = False
   
   #==================================================
   # Test for IP address
 
-  if args.inet:
-    tests+=1
-    field = False
-    if packet[14]>>4==4:
-      if packet[26:30]==args.inet:
-        passes+=1
-      if packet[30:34]==args.inet:
-        passes+=1
-
+  if args.ip:
+    thistest = False
+    for x in args.ip:
+      if packet[14]>>4==4:
+        if packet[26:30]==x or packet[30:34]==x:
+          thistest = True
+    if not thistest:
+      result = False
 
   #==================================================
   # Test for Port (by number)
 
   if args.port:
-    tests+=1
-    field=False
+    thistest=False
     headerlength=False
     # Calculate offset for IPv4
     if packet[14]>>4==4:
@@ -161,17 +175,21 @@ def matchPacket(header, packet):
       headerlength = 54 # I love ipv6
 
     if headerlength:
-      # Lucky me, tcp & udp both put their src/dst ports at the same offset, at the start of their header
-      if int.from_bytes(packet[headerlength:headerlength+2], byteorder='big', signed=False) == args.port:
-        passes+=1
-      if int.from_bytes(packet[headerlength+2:headerlength+4], byteorder='big', signed=False) == args.port:
-        passes+=1
+      for x in args.port:
+        # Lucky me, tcp & udp both put their src/dst ports at the same offset, at the start of their header
+        if int.from_bytes(packet[headerlength:headerlength+2], byteorder='big', signed=False) == x:
+          thistest=True
+        if int.from_bytes(packet[headerlength+2:headerlength+4], byteorder='big', signed=False) == x:
+          thistest=True
+
+    if not thistest:
+      result = False
 
   #==================================================
   # Test for Protocol (TCP/UDP/etc)
 
   if args.proto:
-    tests+=1
+    thistest = False
     field=False
     # Calculate a byte offset for ipv6
     if packet[14]>>4==6:
@@ -180,35 +198,40 @@ def matchPacket(header, packet):
     if packet[14]>>4==4:
       field = 23
     # Test the byte offset against the protocol dict
-    if protocols[args.proto]==packet[field]:
-      passes+=1
+    for x in args.proto:
+      if protocols[x]==packet[field]:
+        thistest=True
+    
+    if not thistest:
+      result = False
 
   #==================================================
   # Test for hex
 
   if args.hex:
-    tests+=1
-    if args.hex in packet:
-      passes+=1
+    thistest = False
+    for x in args.hex:
+      if x in packet:
+        thistest = True
+    if not thistest:
+      result = False
 
   #==================================================
   # Test for start time
 
   if args.time:
-    tests+=1
-    if header['ts_sec']>args.time:
-      passes+=1
+    if not header['ts_sec']>args.time:
+      result=False
 
 
   #==================================================
   # Test for end time
 
   if args.to:
-    tests+=1
-    if args.to>header['ts_sec']:
-      passes+=1
+    if not args.to>header['ts_sec']:
+      result=False
 
-  return(tests==passes)
+  return(result)
 
 def readGlobalHeader(bytes):
   """ reads pcap global header, returns dict """
