@@ -1,4 +1,6 @@
-:warning: This is very unpolished and unfinished. It does what I need, and nothing more.
+:warning: I am not a programmer, I am a nerd who needed to solve a problem.
+Expect the code quality to be appropriately shocking.
+Caveat emptor.
 
 # Ripcap
 
